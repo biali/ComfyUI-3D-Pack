@@ -64,7 +64,9 @@ torchaudio>=2.8.0
 # ── nvdiffrast ──────────────────────────────────────────────
 # Pure-Python + CUDA JIT compilation; installs fine from source.
 # Use git+ so we always get the latest commit (no binary needed).
-nvdiffrast @ git+https://github.com/NVlabs/nvdiffrast.git
+# nvdiffrast requires --no-build-isolation (torch must be present at build time).
+# Handled by jetson_install.sh and the healing pass in run-comfy.sh.
+# nvdiffrast @ git+https://github.com/NVlabs/nvdiffrast.git
 
 # ── diso (Dual Isosurface / DMTet helper) ───────────────────
 # No aarch64 wheel on PyPI – must be built from source.
