@@ -4,5 +4,10 @@
         "./gen_3d_modules",
         "./MVs_Algorithms",
         "./_Pre_Builds/_Build_Scripts"
+    ],
+    "cursorpyright.analysis.extraPaths": [
+        "./gen_3d_modules",
+        "./MVs_Algorithms",
+        "./_Pre_Builds/_Build_Scripts"
     ]
 }

@@ -48,7 +48,7 @@ for pkg in build-essential git cmake ninja-build libgl1 libegl1 libglib2.0-0; do
 done
 if [ ${#PKGS_NEEDED[@]} -gt 0 ]; then
     echo "  Installing: ${PKGS_NEEDED[*]}"
-    sudo apt-get install -y "${PKGS_NEEDED[@]}"
+    apt-get install -y "${PKGS_NEEDED[@]}"
 fi
 
 # ── 1. PyTorch stack (from NGC) ─────────────────────────────────────────

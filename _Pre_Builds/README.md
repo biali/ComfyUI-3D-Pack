@@ -58,18 +58,18 @@ Then following commands are the one that I used to build all required packages f
 
 ```bash
 # Install build tools:
-sudo apt update
-sudo apt install gcc g++
+ apt update
+ apt install gcc g++
 
 # Install CUDA 12.1: 
 # https://developer.nvidia.com/cuda-12-1-0-download-archive?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=22.04&target_type=runfile_local
 wget https://developer.download.nvidia.com/compute/cuda/12.1.0/local_installers/cuda_12.1.0_530.30.02_linux.run
-sudo sh cuda_12.1.0_530.30.02_linux.run
+ sh cuda_12.1.0_530.30.02_linux.run
 
 # Install CUDA 11.8:
 # https://developer.nvidia.com/cuda-11-8-0-download-archive?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=22.04&target_type=runfile_local
 wget https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_520.61.05_linux.run
-sudo sh cuda_11.8.0_520.61.05_linux.run
+ sh cuda_11.8.0_520.61.05_linux.run
 
 # Add CUDA environment variables:
 export PATH="/usr/local/cuda-11.8/bin:$PATH"
@@ -79,8 +79,8 @@ export LD_LIBRARY_PATH="/usr/local/cuda-12.1/lib64:$LD_LIBRARY_PATH"
 
 # Managing Multiple CUDA:
 # https://medium.com/@yushantripleseven/managing-multiple-cuda-cudnn-installations-ba9cdc5e2654
-sudo update-alternatives --install /usr/local/cuda cuda /usr/local/cuda-11.8 10
-sudo update-alternatives --install /usr/local/cuda cuda /usr/local/cuda-12.1 10
+ update-alternatives --install /usr/local/cuda cuda /usr/local/cuda-11.8 10
+ update-alternatives --install /usr/local/cuda cuda /usr/local/cuda-12.1 10
 
 # Install Miniconda: 
 # https://www.rosehosting.com/blog/how-to-install-miniconda-on-ubuntu-22-04/
@@ -101,7 +101,7 @@ conda create --name Comy3D_py312_cu118 python=3.12
 git clone https://github.com/MrForExample/ComfyUI-3D-Pack.git
 
 # Build Wheels with cuda 12.1:
-sudo update-alternatives --config cuda
+ update-alternatives --config cuda
 2
 export CUDA_HOME="/usr/local/cuda-12.1/"
 ~/miniconda3/envs/Comy3D_py310_cu121/bin/python ./ComfyUI-3D-Pack/_Pre_Builds/_Build_Scripts/auto_build_all.py
@@ -109,7 +109,7 @@ export CUDA_HOME="/usr/local/cuda-12.1/"
 ~/miniconda3/envs/Comy3D_py312_cu121/bin/python ./ComfyUI-3D-Pack/_Pre_Builds/_Build_Scripts/auto_build_all.py
 
 # Build Wheels with cuda 11.8:
-sudo update-alternatives --config cuda
+ update-alternatives --config cuda
 1
 export CUDA_HOME="/usr/local/cuda-11.8/"
 ~/miniconda3/envs/Comy3D_py310_cu118/bin/python ./ComfyUI-3D-Pack/_Pre_Builds/_Build_Scripts/auto_build_all.py
@@ -130,7 +130,7 @@ it is quite different and not checked at moment.
 #### Linux setup:
 1. Install nvidia-container-runtime:
     ```bash
-    sudo apt-get install nvidia-container-runtime
+     apt-get install nvidia-container-runtime
     ```
 2. Edit/create the /etc/docker/daemon.json with content:
     ```json
@@ -147,7 +147,7 @@ it is quite different and not checked at moment.
     
 3. Restart docker daemon:
     ```bash
-    sudo systemctl restart docker
+     systemctl restart docker
     ```
 
 4. Finally build and run docker container with:

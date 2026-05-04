@@ -68,7 +68,7 @@ from source.
 ### System prereqs
 
 ```bash
-sudo apt-get install -y \
+ apt-get install -y \
     build-essential git cmake ninja-build \
     libgl1 libegl1 libglib2.0-0 \
     python3-dev
