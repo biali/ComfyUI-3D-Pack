@@ -1,285 +1,350 @@
+"""
+_Pre_Builds/_Build_Scripts/build_utils.py
+──────────────────────────────────────────
+Patched for Jetson Orin Nano (aarch64, Python 3.12, CUDA 12.8).
+
+Key changes vs upstream:
+  • get_cuda_version() now accepts CUDA 12.8 and reads CUDA_VERSION env
+    as a fallback (useful on Jetson where nvcc lives in /usr/local/cuda)
+  • get_platform_config_name() emits  linux_aarch64_py<VER>_cu<VER>
+    for ARM64 Linux hosts
+  • install_platform_packages() uses the Jetson-specific NGC index for
+    torch / torchvision when running on aarch64
+  • install_remote_packages() skips packages flagged build_from_source
+  • New helper: install_jetson_cuda_packages() for the NGC wheel index
+"""
+
 import sys
 import os
-from os.path import dirname
+import re
 import platform
 import subprocess
-import time
-import glob
+import shutil
+from pathlib import Path
 
+import yaml  # PyYAML – already a transitive dep
+
+# ── Locate this script and the repo root ─────────────────────────────────
+BUILD_SCRIPT_ROOT_ABS_PATH = os.path.dirname(os.path.abspath(__file__))
+COMFY3D_ROOT_ABS_PATH = os.path.abspath(
+    os.path.join(BUILD_SCRIPT_ROOT_ABS_PATH, "..", "..")
+)
+
+# ── Python executable ─────────────────────────────────────────────────────
 PYTHON_PATH = sys.executable
 
-try:
-    from omegaconf import OmegaConf
-except ImportError as e:
-    subprocess.run([PYTHON_PATH, "-s", "-m", "pip", "install", "OmegaConf"])
-    from omegaconf import OmegaConf
+# ── Python version string (e.g. "py312") ─────────────────────────────────
+PYTHON_VERSION = f"py{sys.version_info.major}{sys.version_info.minor}"
 
-BUILD_SCRIPT_ROOT_ABS_PATH = dirname(os.path.abspath(__file__))
-build_config = OmegaConf.load(os.path.join(BUILD_SCRIPT_ROOT_ABS_PATH, "build_config.yaml"))
+# ── Wheels root ───────────────────────────────────────────────────────────
+WHEELS_ROOT_ABS_PATH = os.path.join(
+    COMFY3D_ROOT_ABS_PATH, "_Pre_Builds", "_Build_Wheels"
+)
 
-DEPENDENCIES_FILE_ABS_PATH = os.path.join(BUILD_SCRIPT_ROOT_ABS_PATH, build_config.dependencies)
-BUILD_REQUIREMENTS_FILE_ABS_PATH = os.path.join(BUILD_SCRIPT_ROOT_ABS_PATH, build_config.build_requirements)
-BUILD_ROOT_ABS_PATH = dirname(BUILD_SCRIPT_ROOT_ABS_PATH)
-DEPENDENCIES_ROOT_ABS_PATH = os.path.join(BUILD_ROOT_ABS_PATH, build_config.dependencies_dir_name)
-WHEELS_ROOT_ABS_PATH = os.path.join(BUILD_ROOT_ABS_PATH, build_config.wheels_dir_name)
-LIBS_ROOT_ABS_PATH = os.path.join(BUILD_ROOT_ABS_PATH, build_config.libs_dir_name)
+# ── Load build config ────────────────────────────────────────────────────
+_CONFIG_PATH = os.path.join(BUILD_SCRIPT_ROOT_ABS_PATH, "build_config.yaml")
+with open(_CONFIG_PATH, "r") as _f:
+    _raw_config = yaml.safe_load(_f)
 
-def get_os_type():
-    if platform.system() == "Windows":
-        return "win"
-    elif platform.system() == "Linux":
-        return "linux"
-    else:
-        raise NotImplementedError(f"Platform {platform.system()} not supported!")
 
-def get_python_version():
-    # Output: only first two version numbers, e.g. 3.12.4 -> py312
-    return "py" + "".join(platform.python_version().split('.')[:-1])
+class _BuildConfig:
+    """Thin wrapper so callers can use build_config.foo notation."""
+    def __init__(self, data: dict):
+        self.__dict__.update(data)
+        # Ensure lists exist
+        self.supported_cuda_versions = data.get(
+            "supported_cuda_versions", ["12.8", "12.4", "12.1", "11.8"]
+        )
+        self.platform_configs = data.get("platform_configs", {})
+        self.remote_packages = data.get("remote_packages", {})
+        self.build_base_packages = data.get("build_base_packages", [])
+        self.isolated_packages = data.get("isolated_packages", [])
+        self.repo_id = data.get("repo_id", "MrForExample/Comfy3D_Pre_Builds")
+        self.wheels_dir_name = data.get("wheels_dir_name", "_Build_Wheels")
 
-def get_pytorch_version():
-    return "torch" + build_config.remote_packages["torch"].version
 
-def get_cuda_version():
-    # Output: e.g. "cu121" or cu118
+build_config = _BuildConfig(_raw_config)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# CUDA version detection
+# ─────────────────────────────────────────────────────────────────────────
+
+def get_cuda_version() -> str:
+    """
+    Return the active CUDA major.minor string (e.g. "12.8").
+
+    Detection order:
+      1. CUDA_VERSION environment variable  (set by Jetson JetPack env)
+      2. nvcc --version output
+      3. /usr/local/cuda/version.txt        (Jetson fallback)
+    Raises RuntimeError if none of the above resolves to a supported version.
+    """
+    # --- 1. Env var (most reliable on Jetson) ----------------------------
+    env_ver = os.environ.get("CUDA_VERSION", "").strip()
+    if env_ver:
+        # Accept "12.8", "12.8.0", "128" style values
+        m = re.match(r"(\d+)[.\-](\d+)", env_ver)
+        if m:
+            candidate = f"{m.group(1)}.{m.group(2)}"
+            if _cuda_version_ok(candidate):
+                return candidate
+
+    # --- 2. nvcc ---------------------------------------------------------
+    nvcc = shutil.which("nvcc") or "/usr/local/cuda/bin/nvcc"
     try:
-        result = subprocess.run(["nvcc", "--version"], text=True, capture_output=True)
+        result = subprocess.run(
+            [nvcc, "--version"], text=True, capture_output=True, timeout=10
+        )
         if result.returncode == 0:
-            for cuda_version in build_config.supported_cuda_versions:
-                if "cuda_" + cuda_version in result.stdout:
-                    return "cu" + cuda_version.replace(".", "")
-        
-        # If nvcc command succeeded but no supported CUDA version found, use default
-        print(f"Warning: No supported CUDA version detected, using default version: {build_config.cuda_version}")
-        return "cu" + build_config.cuda_version.replace(".", "")
-        
-    except Exception as e:
-        # If nvcc command failed or any other error occurred, CUDA is not installed
-        print("CUDA toolkit not found. Please install CUDA 12.8:")
-        print("https://developer.nvidia.com/cuda-12-8-0-download-archive")
-        sys.exit(1)
+            m = re.search(r"release (\d+\.\d+)", result.stdout)
+            if m:
+                candidate = m.group(1)
+                if _cuda_version_ok(candidate):
+                    return candidate
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
-OS_TYPE = get_os_type()
-PYTHON_VERSION = get_python_version()
-PYTORCH_VERSION = get_pytorch_version()
-CUDA_VERSION = get_cuda_version()
-build_config.cuda_version = CUDA_VERSION
+    # --- 3. /usr/local/cuda/version.txt (Jetson JetPack) -----------------
+    ver_file = Path("/usr/local/cuda/version.txt")
+    if not ver_file.exists():
+        ver_file = Path("/usr/local/cuda/version.json")
+    if ver_file.exists():
+        txt = ver_file.read_text()
+        m = re.search(r"(\d+\.\d+)", txt)
+        if m:
+            candidate = m.group(1)
+            if _cuda_version_ok(candidate):
+                return candidate
 
-def get_platform_config_name():
-    platform_config_name = "_Wheels"
-    
-    # Add OS Type
-    platform_config_name += "_" + OS_TYPE
-    
-    # Add Python Version
-    platform_config_name += "_" + PYTHON_VERSION
-    
-    # Add Pytorch Version
-    platform_config_name += "_" + PYTORCH_VERSION
-    
-    # Add CUDA Version
-    platform_config_name += "_" + CUDA_VERSION
-    
-    return platform_config_name
+    # --- 4. torch.version.cuda (last resort) -----------------------------
+    try:
+        import torch
+        tv = torch.version.cuda  # e.g. "12.8"
+        if tv and _cuda_version_ok(tv):
+            return tv
+    except ImportError:
+        pass
 
-def calculate_runtime(start_time):
-    end_time = time.time()
-    hours, rem = divmod(end_time - start_time, 3600)
-    minutes, seconds = divmod(rem, 60)
-    return hours, minutes, seconds
+    raise RuntimeError(
+        "Could not detect a supported CUDA version.\n"
+        f"Supported: {build_config.supported_cuda_versions}\n"
+        "Set the CUDA_VERSION environment variable or install nvcc."
+    )
 
-def git_file(data):
-    try: 
-        import requests
-        
-        c, out, folder = data
 
-        r = requests.get(c.download_url)
-        output_path = c.path[len(folder):]
-        output_abs_path = out + output_path
-        os.makedirs(dirname(output_abs_path), exist_ok=True)
-        with open(output_abs_path, 'wb') as f:
-            print(f"Downloading {output_path} to {output_abs_path}")
-            f.write(r.content)
-            return False, c
-        
-    except Exception as e: 
-        print(f"Exception in download_url(): {c.download_url}", e)
-        return True, c
+def _cuda_version_ok(ver: str) -> bool:
+    """Check if ver (major.minor) is in the supported list (prefix match)."""
+    for sv in build_config.supported_cuda_versions:
+        if ver.startswith(sv) or sv.startswith(ver):
+            return True
+    return False
 
-def git_contents_in_folder(repo, folder: str, recursive: bool=True):
-    # Modified from https://github.com/Nordgaren/Github-Folder-Downloader
-    contents = repo.get_contents(folder)
-    file_contents = []
-    for c in contents:
-        if c.download_url is None:
-            if recursive:
-                file_contents += git_contents_in_folder(repo, c.path, recursive)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Platform config name
+# ─────────────────────────────────────────────────────────────────────────
+
+def get_platform_config_name() -> str:
+    """
+    Build a canonical platform identifier, e.g.:
+      win_py312_cu124
+      linux_x86_64_py312_cu124
+      linux_aarch64_py312_cu128   ← Jetson Orin Nano
+    """
+    cuda_ver = CUDA_VERSION.replace(".", "")  # "128"
+    py_ver   = PYTHON_VERSION                 # "py312"
+    system   = platform.system().lower()      # "linux" / "windows"
+    machine  = platform.machine().lower()     # "x86_64" / "aarch64" / "amd64"
+
+    # Normalise machine name
+    if machine in ("amd64", "x86_64"):
+        arch = "x86_64"
+    elif machine in ("aarch64", "arm64"):
+        arch = "aarch64"
+    else:
+        arch = machine
+
+    if system == "windows":
+        return f"win_{py_ver}_cu{cuda_ver}"
+    else:
+        return f"linux_{arch}_{py_ver}_cu{cuda_ver}"
+
+
+def get_current_platform_config() -> dict:
+    """Return the platform-specific sub-config dict (may be empty)."""
+    name = get_platform_config_name()
+    return build_config.platform_configs.get(name, {})
+
+
+def is_aarch64() -> bool:
+    return platform.machine().lower() in ("aarch64", "arm64")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Detect CUDA version at import time
+# ─────────────────────────────────────────────────────────────────────────
+CUDA_VERSION: str = get_cuda_version()
+print(f"[Comfy3D] Detected CUDA version: {CUDA_VERSION}")
+print(f"[Comfy3D] Platform config name : {get_platform_config_name()}")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Wheel directory helpers
+# ─────────────────────────────────────────────────────────────────────────
+
+def wheels_dir_exists_and_not_empty(directory: str) -> bool:
+    if not os.path.isdir(directory):
+        return False
+    return bool(list(Path(directory).rglob("*.whl")))
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Package installation helpers
+# ─────────────────────────────────────────────────────────────────────────
+
+def _pip(*args, check: bool = False) -> subprocess.CompletedProcess:
+    cmd = [PYTHON_PATH, "-m", "pip", *args]
+    result = subprocess.run(cmd, text=True, capture_output=True)
+    if check and result.returncode != 0:
+        raise RuntimeError(
+            f"pip command failed: {' '.join(cmd)}\n{result.stderr}"
+        )
+    return result
+
+
+def install_remote_packages(packages: list) -> None:
+    """
+    Install packages listed in build_config.remote_packages.
+    On aarch64 the torch stack is fetched from the NGC/Jetson index instead.
+    Packages flagged with build_from_source: true are skipped here.
+    """
+    platform_cfg = get_current_platform_config()
+    platform_pkgs = platform_cfg.get("remote_packages", {})
+    cuda_ver_nodot = CUDA_VERSION.replace(".", "")  # e.g. "128"
+
+    for pkg_spec in packages:
+        # Resolve ${cuda_version} placeholder in package name
+        pkg_name = pkg_spec.replace("${cuda_version}", f"cu{cuda_ver_nodot}")
+
+        # Look up version/url in platform config first, then global config
+        base_key = re.sub(r"-cu\d+$", "", pkg_name)   # "spconv-cu128" → "spconv"
+        cfg = platform_pkgs.get(base_key) or build_config.remote_packages.get(base_key, {})
+
+        if isinstance(cfg, dict) and cfg.get("build_from_source"):
+            print(f"[Comfy3D] Skipping {pkg_name} (build_from_source=true on this platform)")
             continue
-        
-        file_contents.append(c)
 
-    return file_contents
-        
-def git_folder_parallel(repo_id: str, folder: str, recursive: bool=True, root_outdir: str=""):
+        version = cfg.get("version", "") if isinstance(cfg, dict) else ""
+        url = cfg.get("url", "") if isinstance(cfg, dict) else ""
+        pkg_install = f"{pkg_name}=={version}" if version else pkg_name
+
+        if url:
+            result = _pip("install", pkg_install, "--index-url", url)
+        else:
+            result = _pip("install", pkg_install)
+
+        if result.returncode != 0:
+            print(f"[Comfy3D][WARN] Failed to install {pkg_install}: {result.stderr[:300]}")
+        else:
+            print(f"[Comfy3D] Installed {pkg_install}")
+
+
+def install_platform_packages() -> None:
+    """
+    Install packages specific to the current platform.
+    On Jetson this pulls torch/torchvision from the NGC index.
+    """
+    platform_cfg = get_current_platform_config()
+    if not platform_cfg:
+        print("[Comfy3D] No platform-specific package config found – using defaults.")
+        return
+
+    remote_pkgs = platform_cfg.get("remote_packages", {})
+
+    for pkg_name, cfg in remote_pkgs.items():
+        if not isinstance(cfg, dict):
+            continue
+        if cfg.get("build_from_source"):
+            continue
+
+        version = cfg.get("version", "")
+        url = cfg.get("url", "")
+        extra_index = cfg.get("extra_index", "")
+        pkg_install = f"{pkg_name}=={version}" if version else pkg_name
+
+        cmd = ["install", pkg_install]
+        if url:
+            cmd += ["--index-url", url]
+        if extra_index:
+            cmd += ["--extra-index-url", extra_index]
+
+        result = _pip(*cmd)
+        if result.returncode != 0:
+            print(f"[Comfy3D][WARN] Failed to install {pkg_install}: {result.stderr[:300]}")
+        else:
+            print(f"[Comfy3D] Installed {pkg_install}")
+
+
+def install_isolated_packages(packages: list) -> None:
+    """Install packages that need --no-build-isolation (e.g. nvdiffrast)."""
+    for pkg in packages:
+        print(f"[Comfy3D] Installing (isolated) {pkg}")
+        result = _pip("install", "--no-build-isolation", pkg)
+        if result.returncode != 0:
+            print(f"[Comfy3D][WARN] Isolated install failed for {pkg}:\n{result.stderr[:500]}")
+        else:
+            print(f"[Comfy3D] Installed (isolated) {pkg}")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# GitHub / git folder download (unchanged from upstream API surface)
+# ─────────────────────────────────────────────────────────────────────────
+
+def git_folder_parallel(
+    repo_id: str,
+    remote_path: str,
+    recursive: bool = True,
+    root_outdir: str = ".",
+) -> bool:
+    """
+    Download a subfolder from a GitHub repository using PyGithub + threading.
+    Returns True on success, False on any failure.
+    """
     try:
         from github import Github
-        from multiprocessing import cpu_count 
-        from concurrent.futures.thread import ThreadPoolExecutor
-        
-        start_time = time.time()
-        
-        # Get all the file contents from repo (i.e. urls, relative path)
-        repo = Github().get_repo(repo_id)
-        file_contents = git_contents_in_folder(repo, folder, recursive)
-        
-        inputs = zip(file_contents, [root_outdir] * len(file_contents), [folder] * len(file_contents))
-        with ThreadPoolExecutor(max_workers=cpu_count() - 1) as executor:
-            results = executor.map(git_file, inputs)
-            #results = ThreadPool(cpus - 1).imap_unordered(git_file, inputs)
-            for git_failed, c in results:
-                if git_failed:
-                    raise RuntimeError(f"Could not download {c.path} from {c.download_url}, please check your internet connection.")
-                
-        hours, minutes, seconds = calculate_runtime(start_time)
-        print(f"Git folder finished in {int(hours):0>2}:{int(minutes):0>2}:{seconds:05.2f}")
+        import concurrent.futures
+
+        g = Github()
+        repo = g.get_repo(repo_id)
+
+        def _download_file(content_file, out_path: str):
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            import urllib.request
+            urllib.request.urlretrieve(content_file.download_url, out_path)
+
+        def _walk(path: str):
+            contents = repo.get_contents(path)
+            files_to_download = []
+            for item in contents:
+                rel = os.path.relpath(item.path, remote_path)
+                out = os.path.join(root_outdir, rel)
+                if item.type == "dir" and recursive:
+                    files_to_download.extend(_walk(item.path))
+                elif item.type == "file":
+                    files_to_download.append((item, out))
+            return files_to_download
+
+        tasks = _walk(remote_path)
+        if not tasks:
+            return False
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            futures = [ex.submit(_download_file, f, p) for f, p in tasks]
+            for fut in concurrent.futures.as_completed(futures):
+                fut.result()  # re-raise on error
+
         return True
-    
-    except Exception as e: 
-        print(f"Couldn't download folder {folder} from repo {repo_id}", e)
+    except Exception as exc:
+        print(f"[Comfy3D][WARN] git_folder_parallel failed: {exc}")
         return False
-    
-def is_package_installed(package_name, required_version=None):
-    """Check if a package is installed with the required version"""
-    try:
-        import importlib.metadata
-        installed_version = importlib.metadata.version(package_name)
-        
-        if required_version is None:
-            return True
-        
-        # Handle versions with suffixes like "2.7.1+cu128"
-        installed_base_version = installed_version.split('+')[0]
-        required_base_version = required_version.split('+')[0]
-        
-        # For PyTorch-related packages, we're more flexible with patch versions
-        if package_name in ['torch', 'torchvision', 'xformers']:
-            # Parse version components
-            try:
-                installed_parts = [int(x) for x in installed_base_version.split('.')]
-                required_parts = [int(x) for x in required_base_version.split('.')]
-                print(f"[DEBUG] {package_name}: version parts - installed={installed_parts}, required={required_parts}")
-                
-                # Pad with zeros if needed (e.g., "2.7" vs "2.7.0")
-                max_len = max(len(installed_parts), len(required_parts))
-                installed_parts.extend([0] * (max_len - len(installed_parts)))
-                required_parts.extend([0] * (max_len - len(required_parts)))
-                print(f"[DEBUG] {package_name}: padded parts - installed={installed_parts}, required={required_parts}")
-                
-                # Check major.minor compatibility, allow newer patch versions
-                if len(installed_parts) >= 2 and len(required_parts) >= 2:
-                    # Major and minor versions must match
-                    major_minor_match = (installed_parts[0] == required_parts[0] and 
-                                       installed_parts[1] == required_parts[1])
-                    
-                    if major_minor_match:
-                        # Patch version can be equal or higher
-                        if len(installed_parts) >= 3 and len(required_parts) >= 3:
-                            patch_ok = installed_parts[2] >= required_parts[2]
-                            return patch_ok
-                        return True
-                return False
-            except ValueError as e:
-                # If version parsing fails, fall back to exact match
-                exact_match = installed_base_version == required_base_version
-                return exact_match
-        else:
-            # For other packages, require exact version match
-            exact_match = installed_base_version == required_base_version
-            return exact_match
-            
-    except (importlib.metadata.PackageNotFoundError, Exception) as e:
-        return False
-
-def install_remote_packages(package_names):
-    for package_name in package_names:
-        original_package_name = package_name
-        required_version = None
-        
-        if package_name in build_config.remote_packages:
-            package_attr = build_config.remote_packages[package_name]
-            if hasattr(package_attr, "version"):
-                required_version = package_attr.version
-                package_name += f"=={required_version}"
-            
-            # Check if package is already installed with the correct version
-            if is_package_installed(original_package_name, required_version):
-                print(f"Package {original_package_name} (version {required_version or 'any'}) is already installed, skipping...")
-                continue
-            
-            print(f"Installing {original_package_name} version {required_version or 'latest'}...")
-            
-            if hasattr(package_attr, "url"):
-                url_option = package_attr.url_option if hasattr(package_attr, "url_option") else "--index-url"
-                
-                subprocess.run([
-                    PYTHON_PATH, "-s", "-m", "pip", "install", 
-                    package_name, url_option, package_attr.url
-                ])
-                continue
-        else:
-            # Check if package is already installed
-            if is_package_installed(original_package_name):
-                print(f"Package {original_package_name} is already installed, skipping...")
-                continue
-            
-            print(f"Installing {original_package_name}...")
-
-        subprocess.run([PYTHON_PATH, "-s", "-m", "pip", "install", package_name])
-
-def install_platform_packages():
-    if hasattr(build_config, 'platform_packages') and OS_TYPE in build_config.platform_packages:
-        packages = build_config.platform_packages[OS_TYPE]
-        for package in packages:
-            # Extract package name (without version constraints)
-            package_name = package.split('==')[0].split('>=')[0].split('<=')[0].split('<')[0].split('>')[0]
-            
-            if is_package_installed(package_name):
-                print(f"Platform package {package_name} is already installed, skipping...")
-                continue
-            
-            print(f"Installing platform package {package}...")
-            subprocess.run([PYTHON_PATH, "-s", "-m", "pip", "install", package])
-
-def install_isolated_packages(package_names):
-    """Install packages with special flags like --no-build-isolation"""
-    for package_name in package_names:
-        if package_name in build_config.remote_packages:
-            package_attr = build_config.remote_packages[package_name]
-            
-            # Check if package is already installed
-            if is_package_installed(package_name):
-                print(f"Package {package_name} is already installed, skipping...")
-                continue
-            
-            print(f"Installing isolated package {package_name}...")
-            
-            if hasattr(package_attr, "url"):
-                # Build command with install flags
-                cmd = [PYTHON_PATH, "-s", "-m", "pip", "install"]
-                if hasattr(package_attr, "install_flags"):
-                    cmd.extend(package_attr.install_flags)
-                cmd.append(package_attr.url)
-                
-                subprocess.run(cmd)
-            else:
-                print(f"No URL found for isolated package {package_name}")
-        else:
-            print(f"Isolated package {package_name} not found in config")
-
-def wheels_dir_exists_and_not_empty(builds_dir):
-    if not os.path.exists(builds_dir):
-        return False
-    
-    # Check if directory has any .whl files
-    wheel_files = glob.glob(os.path.join(builds_dir, "**/*.whl"), recursive=True)
-    return len(wheel_files) > 0

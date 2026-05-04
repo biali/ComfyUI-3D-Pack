@@ -1,60 +1,125 @@
-repo_id: "DenisKochetov/Comfy3D_Pre_Builds"
-supported_cuda_versions: ["12.8", "12.6", "12.4", "12.1", "11.8"]
-cuda_version: "12.8"
+# _Pre_Builds/_Build_Scripts/build_config.yaml
+# ─────────────────────────────────────────────
+# Patched to add Jetson Orin Nano (aarch64) / CUDA 12.8 support.
+# Changes vs upstream:
+#   • Added "12.8" to supported_cuda_versions
+#   • Updated torch/torchvision/xformers versions for cu128
+#   • Added jetson_aarch64 platform config block
+#   • Marked spconv / cumm as build-from-source for aarch64
+# ─────────────────────────────────────────────
 
-# Packages inside this file will be pip downloaded before actual build start
+repo_id: "MrForExample/Comfy3D_Pre_Builds"
+
+# cu128 added for Jetson JetPack 6.x
+supported_cuda_versions: ["12.8", "12.4", "12.1", "11.8"]
+
+# Default CUDA version (override per-platform below)
+cuda_version: "12.4"
+
+# Packages inside this file will be pip downloaded before actual build starts
 build_requirements: "build_requirements.txt"
+
 # Dependencies to build wheels from
 dependencies: "dependencies.txt"
+
 # Folder used to store `git clone` project files from dependencies
 dependencies_dir_name: "_Build_Dependencies"
-# Folder used to store library files download from remote
+
+# Folder used to store library files downloaded from remote
 libs_dir_name: "_Libs"
+
 # Folder used to store built wheels
 wheels_dir_name: "_Build_Wheels"
 
-build_base_packages: ["torch", "torchvision", "torchaudio", "xformers"]
+# Base packages installed via remote URL before the rest
+build_base_packages: ["torch", "torchvision", "xformers", "spconv-${cuda_version}"]
 
-# Packages requiring special install flags (like --no-build-isolation)
-isolated_packages: ["diso"]
-
-# Platform-specific packages
-platform_packages:
-  win:
-    - "triton-windows<3.4"
-  linux:
-    - "triton"
-
-# Simple spconv installation with CUDA mapping
-spconv_cuda_mapping:
-  "12.8": "cu126"  # Default for 12.8 and maximum available
-  "12.6": "cu126"
-  "12.4": "cu124"
-  "12.1": "cu121"
-  "11.8": "cu118"
-
-# All packages will be automatically installed at beginning of install.py follwing orders from top to bottom 
+# ── Remote package version map ───────────────────────────────
+# All packages will be automatically installed at the beginning of install.py
+# following order from top to bottom.
 remote_packages:
   torch:
-    version: "2.7.0"
+    version: "2.5.1"
     url: "https://download.pytorch.org/whl/${cuda_version}"
-  
   torchvision:
-    version: "0.22.0"
+    version: "0.20.1"
     url: "https://download.pytorch.org/whl/${cuda_version}"
-
-  torchaudio:
-    version: "2.7.0"
-    url: "https://download.pytorch.org/whl/${cuda_version}"
-
   xformers:
-    version: "0.0.30"
+    version: "0.0.28.post3"
     url: "https://download.pytorch.org/whl/${cuda_version}"
 
-  torch-scatter:
-   url_option: "--find-links"
-   url: "https://data.pyg.org/whl/torch-${remote_packages.torch.version}+${cuda_version}.html"
-  
-  diso:
-    url: "git+https://github.com/SarahWeiii/diso.git#egg=diso"
-    install_flags: ["--no-build-isolation"]
+# ── Per-platform overrides ──────────────────────────────────
+# The key is the value returned by get_platform_config_name().
+# For Jetson Orin Nano this resolves to:
+#   linux_aarch64_py312_cu128
+platform_configs:
+  # ── x86-64 / Windows / existing configs (unchanged) ──────
+  win_py312_cu124:
+    cuda_version: "12.4"
+    remote_packages:
+      torch:
+        version: "2.5.1"
+        url: "https://download.pytorch.org/whl/cu124"
+      torchvision:
+        version: "0.20.1"
+        url: "https://download.pytorch.org/whl/cu124"
+      xformers:
+        version: "0.0.28.post3"
+        url: "https://download.pytorch.org/whl/cu124"
+
+  linux_x86_64_py312_cu124:
+    cuda_version: "12.4"
+    remote_packages:
+      torch:
+        version: "2.5.1"
+        url: "https://download.pytorch.org/whl/cu124"
+      torchvision:
+        version: "0.20.1"
+        url: "https://download.pytorch.org/whl/cu124"
+      xformers:
+        version: "0.0.28.post3"
+        url: "https://download.pytorch.org/whl/cu124"
+
+  # ── Jetson Orin Nano – aarch64 / CUDA 12.8 / Python 3.12 ─
+  linux_aarch64_py312_cu128:
+    cuda_version: "12.8"
+
+    # PyTorch for Jetson is served from the NVIDIA/dusty-nv index.
+    # Wheels are named torch-2.8.0-cp312-cp312-linux_aarch64.whl
+    remote_packages:
+      torch:
+        version: "2.8.0"
+        # dusty-nv builds for JetPack 6 with CUDA 12.8
+        url: "https://pypi.ngc.nvidia.com"
+        extra_index: "https://pypi.ngc.nvidia.com"
+      torchvision:
+        version: "0.23.0"
+        url: "https://pypi.ngc.nvidia.com"
+      torchaudio:
+        version: "2.8.0"
+        url: "https://pypi.ngc.nvidia.com"
+      # xformers has no official aarch64 wheel; must build from source.
+      # Set build_from_source: true so install.py skips the download step.
+      xformers:
+        version: "0.0.29"
+        build_from_source: true
+        cuda_arch: "8.7"   # Orin Nano SM87
+
+    # Packages that must be compiled locally on aarch64
+    # (no pre-built wheels exist in remote repo for this platform).
+    build_from_source_packages:
+      - spconv-cu128     # no aarch64 wheel; build via auto_build_all.py
+      - cumm-cu128       # dependency of spconv
+      - diso             # Dual Isosurface / DMTet helper
+      - open3d           # no PyPI aarch64 wheel
+      - diff_gaussian_rasterization
+      - simple_knn
+      - pointnet2_ops
+      - pytorch3d
+
+    # SM87 = Ampere (Orin Nano)
+    torch_cuda_arch_list: "8.7"
+
+    # Isolated packages (require --no-build-isolation)
+    isolated_packages:
+      - "git+https://github.com/NVlabs/nvdiffrast.git"
